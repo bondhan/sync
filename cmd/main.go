@@ -43,24 +43,23 @@ func main() {
 	destDirSync, err := dirsync.New(ctx, destRoot)
 	checkErr(err)
 
-	wg := sync.WaitGroup{}
+	var wg sync.WaitGroup
 	wg.Add(1)
-	go func(ds dirsync.DirectorySync) {
-		err = ds.BuildList()
+	go func(ss dirsync.DirectorySync) {
+		defer wg.Done()
+		err := ss.BuildList()
 		checkErr(err)
-		wg.Done()
 	}(srcDirSync)
 
 	wg.Add(1)
 	go func(ds dirsync.DirectorySync) {
-		err = ds.BuildList()
+		defer wg.Done()
+		err := ds.BuildList()
 		checkErr(err)
-		wg.Done()
 	}(destDirSync)
-
 	wg.Wait()
 
-	res, err := dirsync.ComputeDiff(srcDirSync.GetList(), destDirSync.GetList())
+	res, err := dirsync.ProcessDirSync(ctx, srcDirSync.GetList(), destDirSync.GetList())
 	checkErr(err)
 
 	dirsync.Print(res)

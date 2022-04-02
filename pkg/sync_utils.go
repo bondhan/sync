@@ -1,13 +1,15 @@
 package dirsync
 
 import (
+	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	dirsyncerr "github.com/bondhan/sync/pkg/errors"
 	"github.com/bondhan/sync/pkg/model"
 	"io"
-	"log"
 	"os"
+	"sync"
 )
 
 func IsDir(path string) (string, error) {
@@ -51,36 +53,103 @@ func QuickSort(a []string) []string {
 	return a
 }
 
-func ComputeDiff(src map[string]model.DirSync, dest map[string]model.DirSync) (map[string]model.DirSync, error) {
+func CompareFile(src model.DirSync, dst map[string]model.DirSync) (bool, error) {
+
+	return false, errors.New("xxx")
+
+	d, ok := dst[src.Name]
+	if !ok {
+		return false, nil
+	}
+
+	if d.Size != src.Size {
+		return false, nil
+	}
+
+	srcSha, err := CalcSHA256(src.Name)
+	if err != nil {
+		return false, err
+	}
+	dstSha, err := CalcSHA256(d.Name)
+	if err != nil {
+		return false, err
+	}
+	if srcSha != dstSha {
+		return false, nil
+	}
+	return true, nil
+}
+
+func ComputeDirSync(i int, ctx context.Context, wg *sync.WaitGroup, done chan struct{},
+	sFile chan model.DirSync, errC chan error, dst map[string]model.DirSync, diff map[string]model.DirSync) {
+	fmt.Println("goroutine:", i)
+	defer wg.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Println("context canceled")
+			return
+		case <-done:
+			fmt.Println("done received from goroutine", i)
+			return
+		default:
+			for file := range sFile {
+				identical, err := CompareFile(file, dst)
+				if err != nil {
+					errC <- err
+					fmt.Println("sending err", errC)
+
+					return
+				}
+				if !identical {
+					diff[file.Name] = file
+				}
+			}
+		}
+	}
+}
+
+func ProcessDirSync(ctx context.Context, src map[string]model.DirSync,
+	dest map[string]model.DirSync) (map[string]model.DirSync, error) {
+	var err error
+
+	ctx, cancelFunc := context.WithCancel(ctx)
+	_ = cancelFunc
+
 	diff := make(map[string]model.DirSync)
+	done := make(chan struct{})
+	sFile := make(chan model.DirSync)
+	errC := make(chan error, 1)
 
-	for k, v := range src {
-		dst, ok := dest[k]
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go ComputeDirSync(i, ctx, &wg, done, sFile, errC, dest, diff)
+	}
+
+	for _, v := range src {
+		sFile <- v
+	}
+
+	done <- struct{}{}
+	close(done)
+	close(sFile)
+
+	fmt.Println("wg wait")
+	wg.Wait()
+	fmt.Println("all closed")
+
+	select {
+	case _err, ok := <-errC:
 		if !ok {
-			diff[k] = v
-			continue
-		}
-
-		if v.Size != dst.Size {
-			diff[k] = v
-			continue
-		}
-
-		srcSha, err := CalcSHA256(v.Name)
-		if err != nil {
-			return nil, err
-		}
-		dstSha, err := CalcSHA256(dst.Name)
-		if err != nil {
-			return nil, err
-		}
-		if srcSha != dstSha {
-			diff[k] = v
-			continue
+			fmt.Println("errC closed")
+		} else {
+			err = _err
+			close(errC)
 		}
 	}
 
-	return diff, nil
+	return diff, err
 }
 
 func Print(list map[string]model.DirSync) {
@@ -106,9 +175,14 @@ func PrintSorted(list map[string]model.DirSync) {
 func CalcSHA256(filepath string) (string, error) {
 	f, err := os.Open(filepath)
 	if err != nil {
-		log.Fatal(err)
+		return "", err
 	}
-	defer f.Close()
+	defer func(file *os.File) {
+		err = file.Close()
+		if err != nil {
+			fmt.Println("Err:", err)
+		}
+	}(f)
 
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
