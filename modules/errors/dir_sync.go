@@ -3,5 +3,6 @@ package dsyncerr
 import "errors"
 
 var (
-	ErrNotFile = errors.New("not a directory")
+	ErrNotDirectory          = errors.New("not a directory")
+	ErrSameSourceDestination = errors.New("source must not be the same with destination")
 )

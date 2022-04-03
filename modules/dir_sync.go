@@ -5,6 +5,7 @@ import (
 	"crypto/md5" //nolint:gosec
 	"errors"
 	"fmt"
+	dsyncerr "github.com/bondhan/sync/modules/errors"
 	"io"
 	"io/fs"
 	"io/ioutil"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"sync"
 )
+
+const WorkerCount = 20
 
 type result struct {
 	sourcePath string
@@ -29,13 +32,14 @@ type inputData struct {
 }
 
 type DirSync struct {
-	ctx        context.Context
-	SrcRoot    string
-	DstRoot    string
-	AbsSrcRoot string
-	AbsDstRoot string
-	TotalFiles int64
-	IsVerbose  bool
+	ctx               context.Context
+	SrcRoot           string
+	DstRoot           string
+	AbsSrcRoot        string
+	AbsDstRoot        string
+	TotalFiles        int64
+	IsVerbose         bool
+	CreateEmptyFolder bool
 }
 
 type DirSyncImpl interface {
@@ -57,6 +61,12 @@ func WithVerbose(isVerbose bool) DSOptions {
 	}
 }
 
+func WithCreateEmptyFolder(createEmptyFolder bool) DSOptions {
+	return func(ds *DirSync) {
+		ds.CreateEmptyFolder = createEmptyFolder
+	}
+}
+
 // New will create a directory sync object given the source and destination directories
 func New(ctx context.Context, srcRoot string, dstRoot string, opts ...DSOptions) (DirSyncImpl, error) {
 	absSrc, err := filepath.Abs(srcRoot)
@@ -69,13 +79,19 @@ func New(ctx context.Context, srcRoot string, dstRoot string, opts ...DSOptions)
 		return nil, err
 	}
 
+	if absSrc == absDst {
+		return nil, dsyncerr.ErrSameSourceDestination
+	}
+
 	ds := &DirSync{
-		ctx:        ctx,
-		SrcRoot:    srcRoot,
-		DstRoot:    dstRoot,
-		AbsSrcRoot: absSrc,
-		AbsDstRoot: absDst,
-		TotalFiles: 0,
+		ctx:               ctx,
+		SrcRoot:           srcRoot,
+		DstRoot:           dstRoot,
+		AbsSrcRoot:        absSrc,
+		AbsDstRoot:        absDst,
+		IsVerbose:         false,
+		TotalFiles:        0,
+		CreateEmptyFolder: false,
 	}
 
 	for _, opt := range opts {
@@ -167,6 +183,8 @@ func (ds *DirSync) walkFiles(done <-chan struct{}, srcRoot string, dstRoot strin
 				ds.PrintErrVerbose("Fail getting file info Err:", err, path, "will be skipped")
 				return _err // internal error
 			}
+			// prepare the destination path
+			dstPath := fmt.Sprintf("%s%s", dstRoot, strings.TrimPrefix(path, srcRoot))
 
 			// if it is directory
 			if f.IsDir() {
@@ -179,10 +197,20 @@ func (ds *DirSync) walkFiles(done <-chan struct{}, srcRoot string, dstRoot strin
 					ds.PrintErrVerbose("Err:", errEmpty, path, "will be skipped")
 					return nil
 				}
-				if isEmpty { // skip if empty directory
+
+				if isEmpty && !ds.CreateEmptyFolder { // skip if empty directory
 					ds.PrintErrVerbose(path, "is empty folder, will be skipped")
 					return nil
 				}
+
+				err = ds.MakeDirIfNotExist(dstPath)
+				if err != nil {
+					ds.PrintErrVerbose("fail create directory err:", err)
+					return nil
+				}
+
+				// always skip directory
+				return nil
 			}
 
 			readable, err := ds.IsFileReadable(path)
@@ -195,9 +223,6 @@ func (ds *DirSync) walkFiles(done <-chan struct{}, srcRoot string, dstRoot strin
 				ds.PrintErrVerbose(path, "cannot be read, will be skipped")
 				return nil
 			}
-
-			// prepare the destination path
-			dstPath := fmt.Sprintf("%s%s", dstRoot, strings.TrimPrefix(path, srcRoot))
 
 			id := inputData{path, dstPath, f.Size(), d.IsDir()}
 			select {
@@ -268,12 +293,7 @@ func (ds *DirSync) checker(done <-chan struct{}, paths <-chan inputData, c chan<
 	for fInput := range paths {
 		// fmt.Println(fInput.srcPath, "-", fInput.dstPath)
 		var err error
-		if fInput.isDir {
-			err = ds.MakeDirIfNotExist(fInput.dstPath)
-			if err == nil {
-				continue
-			}
-		} else if ds.IsFileExist(fInput.dstPath) {
+		if !fInput.isDir && ds.IsFileExist(fInput.dstPath) {
 			// check the srcSize
 			dstSize, err := ds.GetFileSize(fInput.dstPath)
 			if err == nil {
@@ -281,13 +301,13 @@ func (ds *DirSync) checker(done <-chan struct{}, paths <-chan inputData, c chan<
 					dataSrc, err := ioutil.ReadFile(fInput.srcPath)
 					if err != nil {
 						// skip the file
-						ds.PrintErrVerbose("ioutil.ReadFile(fInput.srcPath) err:", err)
+						ds.PrintErrVerbose("read src file before md5 err:", err)
 						continue
 					}
 					dataDst, err := ioutil.ReadFile(fInput.dstPath)
 					if err != nil {
 						// skip the file
-						ds.PrintErrVerbose("ioutil.ReadFile(fInput.dstPath) err:", err)
+						ds.PrintErrVerbose("read dst file before md5 err:", err)
 						continue
 					}
 					if md5.Sum(dataSrc) == md5.Sum(dataDst) { //nolint:gosec
@@ -295,18 +315,23 @@ func (ds *DirSync) checker(done <-chan struct{}, paths <-chan inputData, c chan<
 						continue
 					}
 				}
-			} else {
-				ds.PrintErrVerbose("else:", err)
 			}
+
+			ds.PrintErrVerbose("err get size:", err)
+			continue //skip
 		}
 		select {
 		// list of files need to be copied
 		case c <- result{fInput.srcPath, fInput.dstPath, err}:
+			ds.PrintErrVerbose("sent", result{fInput.srcPath, fInput.dstPath, err})
 		case <-done:
 			return
 		}
 	}
 }
+
+// DoSync will synchronize source and destination folders
+// if context cancel is called then all operation stop accordingly
 func (ds *DirSync) DoSync(ctx context.Context) error {
 	done := make(chan struct{})
 	defer close(done)
@@ -314,25 +339,25 @@ func (ds *DirSync) DoSync(ctx context.Context) error {
 	// level 1, walk the source directory recursively
 	pathdata, errc := ds.walkFiles(done, ds.AbsSrcRoot, ds.AbsDstRoot)
 
-	c := make(chan result)
+	res := make(chan result)
 	var wg sync.WaitGroup
 
 	// number of check workers to validate if need to do copy or no
-	const numCheckers = 20
+	const numCheckers = WorkerCount
 	wg.Add(numCheckers)
 	for i := 0; i < numCheckers; i++ {
 		go func() {
-			ds.checker(done, pathdata, c) // HLc
+			ds.checker(done, pathdata, res) // HLc
 			wg.Done()
 		}()
 	}
 	go func() {
 		wg.Wait()
-		close(c)
+		close(res)
 	}()
 
 	count := 0
-	for r := range c {
+	for r := range res {
 		count++
 		if r.err != nil {
 			ds.PrintErrVerbose("Err r.err:", r.err)

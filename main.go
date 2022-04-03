@@ -36,7 +36,7 @@ func isDir(path string) (bool, error) {
 	}
 
 	if !fileInfo.IsDir() {
-		return false, dsyncerr.ErrNotFile
+		return false, dsyncerr.ErrNotDirectory
 	}
 
 	return true, nil
@@ -44,10 +44,11 @@ func isDir(path string) (bool, error) {
 
 func main() {
 	var src, dest string
-	var isVerbose bool
+	var isVerbose, createEmptyFolder bool
 	flag.StringVar(&src, "s", "", "source folder")
 	flag.StringVar(&dest, "d", "", "destination folder")
 	flag.BoolVar(&isVerbose, "v", false, "verbose")
+	flag.BoolVar(&createEmptyFolder, "e", false, "create empty folder")
 	flag.Parse()
 
 	if dest == "" || src == "" {
@@ -65,7 +66,7 @@ func main() {
 	_, err = isDir(dest)
 	checkErr(err)
 
-	ds, err := dsync.New(ctx, src, dest, dsync.WithVerbose(isVerbose))
+	ds, err := dsync.New(ctx, src, dest, dsync.WithVerbose(isVerbose), dsync.WithCreateEmptyFolder(createEmptyFolder))
 	checkErr(err)
 
 	err = ds.DoSync(ctx)
