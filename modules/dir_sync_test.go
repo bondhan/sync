@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	dsyncerr "github.com/bondhan/sync/modules/errors"
+	"io/fs"
 	"log"
 	"math/rand"
 	"os"
@@ -21,9 +22,13 @@ var (
 	randomFileName string
 )
 
-func writeFile(target string, content string) {
+func writeFile(target string, content string, perm ...int) {
+	permission := 0755
+	if len(perm) != 0 {
+		permission = perm[0]
+	}
 	err := os.WriteFile(target, //nolint:gosec
-		[]byte(content), 0755)
+		[]byte(content), fs.FileMode(permission))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -178,25 +183,26 @@ func TestIsEmptyDir(t *testing.T) {
 	})
 }
 
-func TestMakeDirIfNotExist(t *testing.T) {
-	verboseOpt := WithVerbose(false)
-	emptyFolderOpt := WithCreateEmptyFolder(false)
-
-	t.Run("success", func(t *testing.T) {
-		target := fmt.Sprintf("%s/%s", sourceDir, randomFileName)
-
-		ctx := context.Background()
-
-		ds, err := New(ctx, sourceDir, destinationDir, verboseOpt, emptyFolderOpt)
-		if err != nil {
-			t.Errorf("fail test")
-		}
-		err = ds.MakeDirIfNotExist(target)
-		if err != nil {
-			t.Errorf("should be success")
-		}
-	})
-}
+//
+//func TestMakeDirIfNotExist(t *testing.T) {
+//	verboseOpt := WithVerbose(false)
+//	emptyFolderOpt := WithCreateEmptyFolder(false)
+//
+//	t.Run("success", func(t *testing.T) {
+//		target := fmt.Sprintf("%s/%s", sourceDir, randomFileName)
+//
+//		ctx := context.Background()
+//
+//		ds, err := New(ctx, sourceDir, destinationDir, verboseOpt, emptyFolderOpt)
+//		if err != nil {
+//			t.Errorf("fail test")
+//		}
+//		err = ds.MakeDirIfNotExist(nil, target)
+//		if err != nil {
+//			t.Errorf("should be success")
+//		}
+//	})
+//}
 
 func TestIsFileExist(t *testing.T) {
 	verboseOpt := WithVerbose(false)
@@ -236,4 +242,177 @@ func TestIsFileExist(t *testing.T) {
 		}
 	})
 
+}
+
+func TestGetFileSize(t *testing.T) {
+	verboseOpt := WithVerbose(false)
+	emptyFolderOpt := WithCreateEmptyFolder(false)
+
+	t.Run("success", func(t *testing.T) {
+		target := fmt.Sprintf("%s/%s", sourceDir, randomString(5))
+		writeFile(target, randomString(100))
+
+		defer func(t string) {
+			os.RemoveAll(t)
+		}(target)
+
+		ctx := context.Background()
+
+		ds, err := New(ctx, sourceDir, destinationDir, verboseOpt, emptyFolderOpt)
+		if err != nil {
+			t.Errorf("fail test")
+		}
+		size, err := ds.GetFileSize(target)
+		if err != nil {
+			t.Errorf("must be nil")
+		}
+		if size != 100 {
+			t.Errorf("must be 100 bytes")
+		}
+	})
+}
+
+func TestIsFileReadable(t *testing.T) {
+	verboseOpt := WithVerbose(false)
+	emptyFolderOpt := WithCreateEmptyFolder(false)
+
+	t.Run("success", func(t *testing.T) {
+		target := fmt.Sprintf("%s/%s", sourceDir, randomString(5))
+		writeFile(target, randomString(100))
+
+		defer func(t string) {
+			os.RemoveAll(t)
+		}(target)
+
+		ctx := context.Background()
+
+		ds, err := New(ctx, sourceDir, destinationDir, verboseOpt, emptyFolderOpt)
+		if err != nil {
+			t.Errorf("fail test")
+		}
+		isReadable, err := ds.IsFileReadable(target)
+		if err != nil {
+			t.Errorf("must be nil")
+		}
+		if !isReadable {
+			t.Errorf("must be readable")
+		}
+	})
+
+	t.Run("fail due to permission", func(t *testing.T) {
+		target := fmt.Sprintf("%s/%s", sourceDir, randomString(5))
+		writeFile(target, randomString(100), 0222)
+
+		defer func(t string) {
+			os.RemoveAll(t)
+		}(target)
+
+		ctx := context.Background()
+
+		ds, err := New(ctx, sourceDir, destinationDir, verboseOpt, emptyFolderOpt)
+		if err != nil {
+			t.Errorf("fail test")
+		}
+		isReadable, err := ds.IsFileReadable(target)
+		if err != nil {
+			t.Errorf("must be nil")
+		}
+		if isReadable {
+			t.Errorf("must be readable")
+		}
+	})
+}
+
+func TestIsFileWriteable(t *testing.T) {
+	verboseOpt := WithVerbose(false)
+	emptyFolderOpt := WithCreateEmptyFolder(false)
+
+	t.Run("success", func(t *testing.T) {
+		target := fmt.Sprintf("%s/%s", sourceDir, randomString(5))
+		writeFile(target, randomString(100))
+
+		defer func(t string) {
+			os.RemoveAll(t)
+		}(target)
+
+		ctx := context.Background()
+
+		ds, err := New(ctx, sourceDir, destinationDir, verboseOpt, emptyFolderOpt)
+		if err != nil {
+			t.Errorf("fail test")
+		}
+		isWriteable, err := ds.IsFileWriteable(target)
+		if err != nil {
+			t.Errorf("must be nil")
+		}
+		if !isWriteable {
+			t.Errorf("must be readable")
+		}
+	})
+
+	t.Run("fail due to permission", func(t *testing.T) {
+		target := fmt.Sprintf("%s/%s", sourceDir, randomString(5))
+		writeFile(target, randomString(100), 0444)
+
+		defer func(t string) {
+			os.RemoveAll(t)
+		}(target)
+
+		ctx := context.Background()
+
+		ds, err := New(ctx, sourceDir, destinationDir, verboseOpt, emptyFolderOpt)
+		if err != nil {
+			t.Errorf("fail test")
+		}
+		isWriteable, err := ds.IsFileWriteable(target)
+		if err != nil {
+			t.Errorf("must be nil")
+		}
+		if isWriteable {
+			t.Errorf("must be readable")
+		}
+	})
+}
+
+func TestDosync(t *testing.T) {
+	ctx := context.Background()
+	t.Run("success", func(t *testing.T) {
+		target := fmt.Sprintf("%s/%s", sourceDir, randomString(5))
+		writeFile(target, randomString(100))
+
+		defer func(t string) {
+			os.RemoveAll(t)
+		}(target)
+
+		ds, err := New(ctx, sourceDir, destinationDir)
+		if err != nil {
+			t.Errorf("fail test")
+		}
+		err = ds.DoSync(ctx)
+		if err != nil {
+			t.Errorf("must be nil")
+		}
+	})
+
+	t.Run("success identical file exist in dest", func(t *testing.T) {
+		targetSrc := fmt.Sprintf("%s/%s", sourceDir, "hello")
+		writeFile(targetSrc, randomString(100))
+
+		targetDest := fmt.Sprintf("%s/%s", destinationDir, "hello")
+		writeFile(targetDest, randomString(100))
+
+		defer func(t, d string) {
+			os.RemoveAll(t)
+			os.RemoveAll(d)
+		}(targetSrc, targetDest)
+
+		ds, err := New(ctx, sourceDir, destinationDir)
+		if err != nil {
+			t.Errorf("fail test")
+		}
+		err = ds.DoSync(ctx)
+		if err != nil {
+			t.Errorf("must be nil")
+		}
+	})
 }

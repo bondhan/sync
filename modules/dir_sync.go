@@ -24,7 +24,7 @@ type result struct {
 	err        error
 }
 
-type inputData struct {
+type InputData struct {
 	srcPath string
 	dstPath string
 	srcSize int64
@@ -40,17 +40,19 @@ type DirSync struct {
 	TotalFiles        int64
 	IsVerbose         bool
 	CreateEmptyFolder bool
+	lock              sync.Mutex
 }
 
 type DirSyncImpl interface {
 	IsEmptyDir(dirName string) (bool, error)
-	MakeDirIfNotExist(dirName string) error
+	MakeDirIfNotExist(count chan<- int64, dirName string) error
 	IsFileExist(filename string) bool
 	GetFileSize(fileName string) (int64, error)
 	IsFileReadable(fileName string) (bool, error)
 	IsFileWriteable(fileName string) (bool, error)
-	DoSync(ctx context.Context) error
 	PrintErrVerbose(any ...interface{})
+	DoSync(ctx context.Context) error
+	GetTotal() int64
 }
 
 type DSOptions func(*DirSync)
@@ -128,7 +130,7 @@ func (ds *DirSync) IsEmptyDir(dirName string) (bool, error) {
 }
 
 // MakeDirIfNotExist will create a directory given by dirname if not exist
-func (ds *DirSync) MakeDirIfNotExist(dirName string) error {
+func (ds *DirSync) MakeDirIfNotExist(count chan<- int64, dirName string) error {
 	// check if destination folder exist
 	_, err := os.Stat(dirName)
 	if os.IsNotExist(err) {
@@ -139,6 +141,7 @@ func (ds *DirSync) MakeDirIfNotExist(dirName string) error {
 			return err
 		}
 		ds.PrintErrVerbose(dirName, "successfully created")
+		count <- 1
 	}
 	return nil
 }
@@ -153,17 +156,17 @@ func (ds *DirSync) IsFileExist(filename string) bool {
 	return true
 }
 
-// walk files will recursively list all the files and directories of a source root and checks
+// WalkFiles will recursively list all the files and directories of a source root and checks
 // if those files exist in destination root, if not then return the destination and the error
-func (ds *DirSync) walkFiles(ctx context.Context, done <-chan struct{}, srcRoot string, dstRoot string) (<-chan inputData, <-chan error) {
-	pathData := make(chan inputData)
+func (ds *DirSync) walkFiles(ctx context.Context, done <-chan struct{}, count chan<- int64) (<-chan InputData, <-chan error) {
+	pathData := make(chan InputData)
 	errC := make(chan error, 1)
 
 	go func() {
 		defer close(pathData)
 		// WalkDir will recursively run through the directory for files and dirs
-		errC <- filepath.WalkDir(srcRoot, func(path string, d fs.DirEntry, err error) error {
-			if path == srcRoot {
+		errC <- filepath.WalkDir(ds.AbsSrcRoot, func(path string, d fs.DirEntry, err error) error {
+			if path == ds.AbsSrcRoot {
 				return nil // no need to check the root
 			}
 			// check the error
@@ -184,7 +187,7 @@ func (ds *DirSync) walkFiles(ctx context.Context, done <-chan struct{}, srcRoot 
 				return _err // internal error
 			}
 			// prepare the destination path
-			dstPath := fmt.Sprintf("%s%s", dstRoot, strings.TrimPrefix(path, srcRoot))
+			dstPath := fmt.Sprintf("%s%s", ds.AbsDstRoot, strings.TrimPrefix(path, ds.AbsSrcRoot))
 
 			// if it is directory
 			if f.IsDir() {
@@ -203,7 +206,7 @@ func (ds *DirSync) walkFiles(ctx context.Context, done <-chan struct{}, srcRoot 
 					return nil
 				}
 
-				err = ds.MakeDirIfNotExist(dstPath)
+				err = ds.MakeDirIfNotExist(count, dstPath)
 				if err != nil {
 					ds.PrintErrVerbose("fail create directory err:", err)
 					return nil
@@ -224,7 +227,7 @@ func (ds *DirSync) walkFiles(ctx context.Context, done <-chan struct{}, srcRoot 
 				return nil
 			}
 
-			id := inputData{path, dstPath, f.Size(), d.IsDir()}
+			id := InputData{path, dstPath, f.Size(), d.IsDir()}
 			select {
 			case pathData <- id:
 			case <-ctx.Done():
@@ -289,7 +292,8 @@ func (ds *DirSync) IsFileWriteable(fileName string) (bool, error) {
 	return true, nil
 }
 
-func (ds *DirSync) checker(ctx context.Context, done <-chan struct{}, paths <-chan inputData, c chan<- result) {
+// Checker will do mostly validation if a file is feasible to be copied
+func (ds *DirSync) fileValidator(ctx context.Context, done <-chan struct{}, paths <-chan InputData, c chan<- result) {
 	for fInput := range paths {
 		// fmt.Println(fInput.srcPath, "-", fInput.dstPath)
 		var err error
@@ -332,14 +336,23 @@ func (ds *DirSync) checker(ctx context.Context, done <-chan struct{}, paths <-ch
 	}
 }
 
+func (ds *DirSync) GetTotal() int64 {
+	ds.lock.Lock()
+	defer ds.lock.Unlock()
+	return ds.TotalFiles
+}
+
 // DoSync will synchronize source and destination folders
 // if context cancel is called then all operation stop accordingly
 func (ds *DirSync) DoSync(ctx context.Context) error {
 	done := make(chan struct{})
 	defer close(done) // if close, all downstream will abandon its work
 
+	count := make(chan int64, 1)
+	defer close(count)
+
 	// level 1, walk the source directory recursively
-	pathdata, errc := ds.walkFiles(ctx, done, ds.AbsSrcRoot, ds.AbsDstRoot)
+	pathdata, errc := ds.walkFiles(ctx, done, count)
 
 	res := make(chan result)
 	var wg sync.WaitGroup
@@ -349,7 +362,7 @@ func (ds *DirSync) DoSync(ctx context.Context) error {
 	wg.Add(numCheckers)
 	for i := 0; i < numCheckers; i++ {
 		go func() {
-			ds.checker(ctx, done, pathdata, res) // HLc
+			ds.fileValidator(ctx, done, pathdata, res) // HLc
 			wg.Done()
 		}()
 	}
@@ -358,9 +371,22 @@ func (ds *DirSync) DoSync(ctx context.Context) error {
 		close(res)
 	}()
 
-	count := 0
+	go func() {
+		for {
+			select {
+			case <-count:
+				ds.lock.Lock()
+				ds.TotalFiles++
+				ds.lock.Unlock()
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			}
+		}
+	}()
+
 	for r := range res {
-		count++
 		if r.err != nil {
 			ds.PrintErrVerbose("Err r.err:", r.err)
 			continue
@@ -377,6 +403,7 @@ func (ds *DirSync) DoSync(ctx context.Context) error {
 			ds.PrintErrVerbose("Error creating", r.destPath, "Err:", err)
 			return err
 		}
+		count <- 1
 	}
 
 	// Check whether the Walk failed.
@@ -384,6 +411,8 @@ func (ds *DirSync) DoSync(ctx context.Context) error {
 		ds.PrintErrVerbose("walkFiles err:", err)
 		return err
 	}
+
+	//ds.PrintErrVerbose("Total processed:", ds.TotalFiles)
 
 	// Return err
 	return nil
