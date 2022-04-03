@@ -155,7 +155,7 @@ func (ds *DirSync) IsFileExist(filename string) bool {
 
 // walk files will recursively list all the files and directories of a source root and checks
 // if those files exist in destination root, if not then return the destination and the error
-func (ds *DirSync) walkFiles(done <-chan struct{}, srcRoot string, dstRoot string) (<-chan inputData, <-chan error) {
+func (ds *DirSync) walkFiles(ctx context.Context, done <-chan struct{}, srcRoot string, dstRoot string) (<-chan inputData, <-chan error) {
 	pathData := make(chan inputData)
 	errC := make(chan error, 1)
 
@@ -227,10 +227,10 @@ func (ds *DirSync) walkFiles(done <-chan struct{}, srcRoot string, dstRoot strin
 			id := inputData{path, dstPath, f.Size(), d.IsDir()}
 			select {
 			case pathData <- id:
-
+			case <-ctx.Done():
+				return errors.New("sync canceled")
 			case <-done:
-				ds.PrintErrVerbose("done in walkFiles")
-				return errors.New("walk canceled")
+				return errors.New("sync canceled")
 			}
 			return nil
 		})
@@ -289,7 +289,7 @@ func (ds *DirSync) IsFileWriteable(fileName string) (bool, error) {
 	return true, nil
 }
 
-func (ds *DirSync) checker(done <-chan struct{}, paths <-chan inputData, c chan<- result) {
+func (ds *DirSync) checker(ctx context.Context, done <-chan struct{}, paths <-chan inputData, c chan<- result) {
 	for fInput := range paths {
 		// fmt.Println(fInput.srcPath, "-", fInput.dstPath)
 		var err error
@@ -318,12 +318,14 @@ func (ds *DirSync) checker(done <-chan struct{}, paths <-chan inputData, c chan<
 			}
 
 			ds.PrintErrVerbose("err get size:", err)
-			continue //skip
+			continue // skip
 		}
 		select {
 		// list of files need to be copied
 		case c <- result{fInput.srcPath, fInput.dstPath, err}:
 			ds.PrintErrVerbose("sent", result{fInput.srcPath, fInput.dstPath, err})
+		case <-ctx.Done():
+			return
 		case <-done:
 			return
 		}
@@ -334,10 +336,10 @@ func (ds *DirSync) checker(done <-chan struct{}, paths <-chan inputData, c chan<
 // if context cancel is called then all operation stop accordingly
 func (ds *DirSync) DoSync(ctx context.Context) error {
 	done := make(chan struct{})
-	defer close(done)
+	defer close(done) // if close, all downstream will abandon its work
 
 	// level 1, walk the source directory recursively
-	pathdata, errc := ds.walkFiles(done, ds.AbsSrcRoot, ds.AbsDstRoot)
+	pathdata, errc := ds.walkFiles(ctx, done, ds.AbsSrcRoot, ds.AbsDstRoot)
 
 	res := make(chan result)
 	var wg sync.WaitGroup
@@ -347,7 +349,7 @@ func (ds *DirSync) DoSync(ctx context.Context) error {
 	wg.Add(numCheckers)
 	for i := 0; i < numCheckers; i++ {
 		go func() {
-			ds.checker(done, pathdata, res) // HLc
+			ds.checker(ctx, done, pathdata, res) // HLc
 			wg.Done()
 		}()
 	}

@@ -7,6 +7,8 @@ import (
 	dsync "github.com/bondhan/sync/modules"
 	"github.com/bondhan/sync/modules/errors"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 func checkErr(err error) {
@@ -68,6 +70,15 @@ func main() {
 
 	ds, err := dsync.New(ctx, src, dest, dsync.WithVerbose(isVerbose), dsync.WithCreateEmptyFolder(createEmptyFolder))
 	checkErr(err)
+
+	// Setting up a channel to capture system signals
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGKILL)
+
+	go func() {
+		<-stop
+		cancel()
+	}()
 
 	err = ds.DoSync(ctx)
 	checkErr(err)
