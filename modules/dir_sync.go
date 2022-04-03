@@ -45,7 +45,7 @@ type DirSync struct {
 
 type DirSyncImpl interface {
 	IsEmptyDir(dirName string) (bool, error)
-	MakeDirIfNotExist(count chan<- int64, dirName string) error
+	MakeDirIfNotExist(dirName string) error
 	IsFileExist(filename string) bool
 	GetFileSize(fileName string) (int64, error)
 	IsFileReadable(fileName string) (bool, error)
@@ -130,7 +130,7 @@ func (ds *DirSync) IsEmptyDir(dirName string) (bool, error) {
 }
 
 // MakeDirIfNotExist will create a directory given by dirname if not exist
-func (ds *DirSync) MakeDirIfNotExist(count chan<- int64, dirName string) error {
+func (ds *DirSync) MakeDirIfNotExist(dirName string) error {
 	// check if destination folder exist
 	_, err := os.Stat(dirName)
 	if os.IsNotExist(err) {
@@ -141,7 +141,6 @@ func (ds *DirSync) MakeDirIfNotExist(count chan<- int64, dirName string) error {
 			return err
 		}
 		ds.PrintErrVerbose(dirName, "successfully created")
-		count <- 1
 	}
 	return nil
 }
@@ -206,7 +205,7 @@ func (ds *DirSync) walkFiles(ctx context.Context, done <-chan struct{}, count ch
 					return nil
 				}
 
-				err = ds.MakeDirIfNotExist(count, dstPath)
+				err = ds.MakeDirIfNotExist(dstPath)
 				if err != nil {
 					ds.PrintErrVerbose("fail create directory err:", err)
 					return nil
@@ -348,7 +347,7 @@ func (ds *DirSync) DoSync(ctx context.Context) error {
 	done := make(chan struct{})
 	defer close(done) // if close, all downstream will abandon its work
 
-	count := make(chan int64, 1)
+	count := make(chan int64)
 	defer close(count)
 
 	// level 1, walk the source directory recursively
@@ -362,6 +361,7 @@ func (ds *DirSync) DoSync(ctx context.Context) error {
 	wg.Add(numCheckers)
 	for i := 0; i < numCheckers; i++ {
 		go func() {
+			//level 2 validate if file is valid for copy to destination
 			ds.fileValidator(ctx, done, pathdata, res) // HLc
 			wg.Done()
 		}()
@@ -371,12 +371,13 @@ func (ds *DirSync) DoSync(ctx context.Context) error {
 		close(res)
 	}()
 
+	// set a goroutine to listen to number of changes
 	go func() {
 		for {
 			select {
-			case <-count:
+			case cnt := <-count:
 				ds.lock.Lock()
-				ds.TotalFiles++
+				ds.TotalFiles = cnt
 				ds.lock.Unlock()
 			case <-ctx.Done():
 				return
@@ -386,9 +387,11 @@ func (ds *DirSync) DoSync(ctx context.Context) error {
 		}
 	}()
 
+	cnt := int64(0)
+	//level 3 copy action
 	for r := range res {
 		if r.err != nil {
-			ds.PrintErrVerbose("Err r.err:", r.err)
+			ds.PrintErrVerbose("receive r.err:", r.err)
 			continue
 		}
 
@@ -403,7 +406,8 @@ func (ds *DirSync) DoSync(ctx context.Context) error {
 			ds.PrintErrVerbose("Error creating", r.destPath, "Err:", err)
 			return err
 		}
-		count <- 1
+		cnt++
+		count <- cnt
 	}
 
 	// Check whether the Walk failed.
@@ -411,9 +415,7 @@ func (ds *DirSync) DoSync(ctx context.Context) error {
 		ds.PrintErrVerbose("walkFiles err:", err)
 		return err
 	}
-
-	//ds.PrintErrVerbose("Total processed:", ds.TotalFiles)
-
+	count <- cnt
 	// Return err
 	return nil
 }

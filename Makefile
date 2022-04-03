@@ -3,11 +3,11 @@
 OS := $(shell uname)
 VERSION ?= 1.0.0
 APPNAME := sync
-MAIN := ./cmd/main.go
+MAIN := main.go
 
 # target #
 
-default: unit-test integration-test build run
+default: unit-test integration-test build
 
 build:
 	mkdir -p bin
@@ -35,6 +35,3 @@ unit-test:
 
 integration-test:
  	@go test -count=1 -v --cover -tags="integration" -p 1 ./... --env-path=.env
-
-run:
-	./bin/sync

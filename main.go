@@ -83,5 +83,5 @@ func main() {
 	err = ds.DoSync(ctx)
 	checkErr(err)
 
-	fmt.Println("Total process:", ds.GetTotal())
+	fmt.Println("Total files processed:", ds.GetTotal())
 }

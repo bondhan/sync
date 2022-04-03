@@ -14,11 +14,12 @@ import (
 )
 
 const (
-	sourceDir      = "/tmp/source"
-	destinationDir = "/tmp/destination"
+	rootDir = "/tmp"
 )
 
 var (
+	sourceDir      string
+	destinationDir string
 	randomFileName string
 )
 
@@ -62,6 +63,9 @@ func ensureDir(dirName string) error {
 }
 
 func TestMain(m *testing.M) {
+	sourceDir = fmt.Sprintf("%s/%s", rootDir, randomString(10))
+	destinationDir = fmt.Sprintf("%s/%s", rootDir, randomString(10))
+
 	if err := os.RemoveAll(sourceDir); err != nil {
 		log.Fatal(err)
 	}
@@ -86,7 +90,7 @@ func TestMain(m *testing.M) {
 		}
 	}()
 
-	os.Exit(m.Run())
+	m.Run()
 }
 
 func TestNew(t *testing.T) {
@@ -183,26 +187,25 @@ func TestIsEmptyDir(t *testing.T) {
 	})
 }
 
-//
-//func TestMakeDirIfNotExist(t *testing.T) {
-//	verboseOpt := WithVerbose(false)
-//	emptyFolderOpt := WithCreateEmptyFolder(false)
-//
-//	t.Run("success", func(t *testing.T) {
-//		target := fmt.Sprintf("%s/%s", sourceDir, randomFileName)
-//
-//		ctx := context.Background()
-//
-//		ds, err := New(ctx, sourceDir, destinationDir, verboseOpt, emptyFolderOpt)
-//		if err != nil {
-//			t.Errorf("fail test")
-//		}
-//		err = ds.MakeDirIfNotExist(nil, target)
-//		if err != nil {
-//			t.Errorf("should be success")
-//		}
-//	})
-//}
+func TestMakeDirIfNotExist(t *testing.T) {
+	verboseOpt := WithVerbose(false)
+	emptyFolderOpt := WithCreateEmptyFolder(false)
+
+	t.Run("success", func(t *testing.T) {
+		target := fmt.Sprintf("%s/%s", sourceDir, randomFileName)
+
+		ctx := context.Background()
+
+		ds, err := New(ctx, sourceDir, destinationDir, verboseOpt, emptyFolderOpt)
+		if err != nil {
+			t.Errorf("fail test")
+		}
+		err = ds.MakeDirIfNotExist(target)
+		if err != nil {
+			t.Errorf("should be success")
+		}
+	})
+}
 
 func TestIsFileExist(t *testing.T) {
 	verboseOpt := WithVerbose(false)
@@ -394,12 +397,36 @@ func TestDosync(t *testing.T) {
 		}
 	})
 
+	t.Run("success and create if empty and verbose", func(t *testing.T) {
+		verboseOpt := WithVerbose(true)
+		emptyFolderOpt := WithCreateEmptyFolder(true)
+
+		target := fmt.Sprintf("%s/%s", sourceDir, randomString(5))
+		err := ensureDir(target)
+		if err != nil {
+			t.Errorf("error")
+		}
+
+		defer func(t string) {
+			os.RemoveAll(t)
+		}(target)
+
+		ds, err := New(ctx, sourceDir, destinationDir, verboseOpt, emptyFolderOpt)
+		if err != nil {
+			t.Errorf("fail test")
+		}
+		err = ds.DoSync(ctx)
+		if err != nil {
+			t.Errorf("must be nil")
+		}
+	})
+
 	t.Run("success identical file exist in dest", func(t *testing.T) {
 		targetSrc := fmt.Sprintf("%s/%s", sourceDir, "hello")
-		writeFile(targetSrc, randomString(100))
+		writeFile(targetSrc, "hello")
 
 		targetDest := fmt.Sprintf("%s/%s", destinationDir, "hello")
-		writeFile(targetDest, randomString(100))
+		writeFile(targetDest, "hello")
 
 		defer func(t, d string) {
 			os.RemoveAll(t)
@@ -411,8 +438,55 @@ func TestDosync(t *testing.T) {
 			t.Errorf("fail test")
 		}
 		err = ds.DoSync(ctx)
+		fmt.Println("err:", err)
 		if err != nil {
 			t.Errorf("must be nil")
 		}
 	})
+
+	t.Run("success same filename, same size, different content", func(t *testing.T) {
+		targetSrc := fmt.Sprintf("%s/%s", sourceDir, "hello")
+		writeFile(targetSrc, "hello")
+
+		targetDest := fmt.Sprintf("%s/%s", destinationDir, "hello")
+		writeFile(targetDest, "hella")
+
+		defer func(t, d string) {
+			os.RemoveAll(t)
+			os.RemoveAll(d)
+		}(targetSrc, targetDest)
+
+		ds, err := New(ctx, sourceDir, destinationDir)
+		if err != nil {
+			t.Errorf("fail test")
+		}
+		err = ds.DoSync(ctx)
+		fmt.Println("err:", err)
+		if err != nil {
+			t.Errorf("must be nil")
+		}
+	})
+
+	t.Run("success a file has permission access", func(t *testing.T) {
+		verboseOpt := WithVerbose(true)
+		emptyFolderOpt := WithCreateEmptyFolder(true)
+
+		targetSrc := fmt.Sprintf("%s/%s", sourceDir, "hello")
+		writeFile(targetSrc, "hello", 0000)
+
+		defer func(t string) {
+			os.RemoveAll(t)
+		}(targetSrc)
+
+		ds, err := New(ctx, sourceDir, destinationDir, verboseOpt, emptyFolderOpt)
+		if err != nil {
+			t.Errorf("fail test")
+		}
+		err = ds.DoSync(ctx)
+		fmt.Println("err:", err)
+		if err != nil {
+			t.Errorf("must be nil")
+		}
+	})
+
 }
