@@ -1,14 +1,18 @@
-package dirsync
+package syncutils
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	dirsyncerr "github.com/bondhan/sync/pkg/errors"
-	"github.com/bondhan/sync/pkg/model"
+	dirsyncerr "github.com/bondhan/sync/modules/errors"
+	"github.com/bondhan/sync/modules/model"
 	"io"
+	"io/fs"
+	"io/ioutil"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -35,28 +39,7 @@ func IsDir(path string) (string, error) {
 	return path, nil
 }
 
-func QuickSort(a []string) []string {
-	if len(a) < 2 {
-		return a
-	}
-	pivot := len(a) - 1
-	left := 0
-	for i := range a {
-		if a[i] < a[pivot] {
-			a[left], a[i] = a[i], a[left]
-			left++
-		}
-	}
-	a[pivot], a[left] = a[left], a[pivot]
-	QuickSort(a[:left])
-	QuickSort(a[left+1:])
-	return a
-}
-
 func CompareFile(src model.DirSync, dst map[string]model.DirSync) (bool, error) {
-
-	return false, errors.New("xxx")
-
 	d, ok := dst[src.Name]
 	if !ok {
 		return false, nil
@@ -109,76 +92,6 @@ func ComputeDirSync(i int, ctx context.Context, wg *sync.WaitGroup, done chan st
 	}
 }
 
-func ProcessDirSync(ctx context.Context, src map[string]model.DirSync,
-	dest map[string]model.DirSync) (map[string]model.DirSync, error) {
-	const workerCount = 4
-	var err error
-
-	ctx, cancelFunc := context.WithCancel(ctx)
-	_ = cancelFunc
-
-	diff := make(map[string]model.DirSync)
-	done := make(chan struct{}, workerCount)
-	sFile := make(chan model.DirSync)
-	errC := make(chan error)
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func(w *sync.WaitGroup) {
-		defer w.Done()
-		select {
-		case _err, ok := <-errC:
-			if !ok {
-				fmt.Println("errC closed")
-			} else {
-				err = _err
-				close(errC)
-			}
-			break
-		}
-	}(&wg)
-
-	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go ComputeDirSync(i, ctx, &wg, done, sFile, errC, dest, diff)
-	}
-
-	for _, v := range src {
-		sFile <- v
-	}
-	close(done)
-	close(sFile)
-	close(errC)
-
-	fmt.Println("wg wait")
-	wg.Wait()
-
-	fmt.Println("all closed")
-
-	return diff, err
-}
-
-func Print(list map[string]model.DirSync) {
-	for _, v := range list {
-		fmt.Println(v.Name, v.Size, "bytes", v.ModTime)
-	}
-}
-
-func PrintSorted(list map[string]model.DirSync) {
-	keys := make([]string, 0, len(list))
-	for k := range list {
-		keys = append(keys, k)
-	}
-
-	sortedKeys := QuickSort(keys)
-
-	for _, k := range sortedKeys {
-		v := list[k]
-		fmt.Println(v.Name, v.Size, "bytes", v.ModTime)
-	}
-}
-
 func CalcSHA256(filepath string) (string, error) {
 	f, err := os.Open(filepath)
 	if err != nil {
@@ -197,4 +110,155 @@ func CalcSHA256(filepath string) (string, error) {
 	}
 
 	return string(h.Sum(nil)), nil
+}
+
+func IsEmptyDir(dirName string) (bool, error) {
+	f, err := os.Open(dirName)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	_, err = f.Readdirnames(1) // Or f.Readdir(1)
+	if err == io.EOF {
+		return true, nil
+	}
+	return false, err
+}
+
+func walkFiles(done <-chan struct{}, root string) (<-chan inputData, <-chan error) {
+	pathdata := make(chan inputData)
+	errc := make(chan error, 1)
+
+	go func() {
+		defer close(pathdata)
+		errc <- filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				if !errors.Is(err, fs.ErrPermission) {
+					return err
+				}
+				fmt.Println("Err:", err, path, "will be skipped")
+				return nil
+			}
+
+			// get the file info
+			f, _err := d.Info()
+			if _err != nil {
+				return err // internal error
+			}
+
+			// if it is directory
+			if f.IsDir() {
+				// and check if empty
+				isEmpty, errEmpty := IsEmptyDir(path)
+				if errEmpty != nil { // if we found error during checking, blacklist
+					if !errors.Is(errEmpty, fs.ErrPermission) {
+						return err
+					}
+					fmt.Println("Err:", errEmpty, path, "will be skipped")
+					return nil
+				}
+				if isEmpty { // skip if empty directory
+					fmt.Println(path, "is empty folder, will be skipped")
+					return nil
+				}
+			}
+
+			id := inputData{path, f.Size(), d.IsDir()}
+			select {
+			case pathdata <- id:
+
+			case <-done:
+				fmt.Println("done in walkFiles")
+				return errors.New("walk canceled")
+			}
+			return nil
+		})
+	}()
+
+	return pathdata, errc
+}
+
+// A result is the product of reading and summing a file using MD5.
+type result struct {
+	sourcePath string
+	destPath   string
+	sum        [md5.Size]byte
+	err        error
+}
+
+// A result is the product of reading and summing a file using MD5.
+type inputData struct {
+	path  string
+	size  int64
+	isDir bool
+}
+
+func digester(done <-chan struct{}, paths <-chan inputData, c chan<- result) {
+	for fInput := range paths { // HLpaths
+		if fInput.isDir {
+			//check if empty
+			//check if destination has it
+			//if not create dir in destination
+		} else {
+			//check if destination exist
+			//if not exist return the file to be copy
+			//if exist calculate the md5 destination and source
+			//if not equal then return the file to be copy
+
+			data, err := ioutil.ReadFile(fInput.path)
+			select {
+			case c <- result{fInput.path, fInput.path, md5.Sum(data), err}:
+			case <-done:
+				return
+			}
+		}
+	}
+}
+func DoSync(ctx context.Context, srcRoot string, dstRoot string) (map[string][md5.Size]byte, error) {
+	done := make(chan struct{})
+	defer close(done)
+
+	// level 1, walk the source file system
+	pathdata, errc := walkFiles(done, srcRoot)
+
+	c := make(chan result)
+	var wg sync.WaitGroup
+	const numDigesters = 20
+	wg.Add(numDigesters)
+	for i := 0; i < numDigesters; i++ {
+		go func() {
+			digester(done, pathdata, c) // HLc
+			wg.Done()
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(c)
+	}()
+
+	m := make(map[string][md5.Size]byte)
+	for r := range c {
+		if r.err != nil {
+			fmt.Println("Err:", r.err)
+			continue
+		}
+		m[r.sourcePath] = r.sum
+	}
+
+	// Check whether the Walk failed.
+	if err := <-errc; err != nil {
+		fmt.Println("walkFiles err:", err)
+		return nil, err
+	}
+	return m, nil
+
+	// level 2, check if:
+	// 	- is empty directory then ignore
+	//   - check if file exist and identical with destination
+
+	// level 3, copy file to destination
+
+	// Return err
+	return m, nil
 }

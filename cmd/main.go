@@ -4,9 +4,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	dirsync "github.com/bondhan/sync/pkg"
+	syncutils "github.com/bondhan/sync/modules"
 	"os"
-	"sync"
+	"sort"
 )
 
 func checkErr(err error) {
@@ -31,36 +31,21 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	srcRoot, err := dirsync.IsDir(src)
+	srcRoot, err := syncutils.IsDir(src)
 	checkErr(err)
 
-	destRoot, err := dirsync.IsDir(dest)
+	dstRoot, err := syncutils.IsDir(dest)
 	checkErr(err)
 
-	srcDirSync, err := dirsync.New(ctx, srcRoot)
+	m, err := syncutils.DoSync(ctx, srcRoot, dstRoot)
 	checkErr(err)
 
-	destDirSync, err := dirsync.New(ctx, destRoot)
-	checkErr(err)
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func(ss dirsync.DirectorySync) {
-		defer wg.Done()
-		err := ss.BuildList()
-		checkErr(err)
-	}(srcDirSync)
-
-	wg.Add(1)
-	go func(ds dirsync.DirectorySync) {
-		defer wg.Done()
-		err := ds.BuildList()
-		checkErr(err)
-	}(destDirSync)
-	wg.Wait()
-
-	res, err := dirsync.ProcessDirSync(ctx, srcDirSync.GetList(), destDirSync.GetList())
-	checkErr(err)
-
-	dirsync.Print(res)
+	var paths []string
+	for path := range m {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		fmt.Printf("%x  %s\n", m[path], path)
+	}
 }
