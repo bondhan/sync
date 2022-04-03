@@ -1,4 +1,4 @@
-package dirsyncerr
+package dsyncerr
 
 import "errors"
 
