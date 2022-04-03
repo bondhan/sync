@@ -42,7 +42,8 @@ Help:
 
 ## Under the skin
 
-![sync under the skin](./doc/sync_drawio.png)
+![syncdrawio.png](./assets/sync.drawio.png)
+
 
 I follow the reference[1] regarding pipeline. Basically there are 2 channels which being used to connect 3 processes.
 
