@@ -111,18 +111,35 @@ func ComputeDirSync(i int, ctx context.Context, wg *sync.WaitGroup, done chan st
 
 func ProcessDirSync(ctx context.Context, src map[string]model.DirSync,
 	dest map[string]model.DirSync) (map[string]model.DirSync, error) {
+	const workerCount = 4
 	var err error
 
 	ctx, cancelFunc := context.WithCancel(ctx)
 	_ = cancelFunc
 
 	diff := make(map[string]model.DirSync)
-	done := make(chan struct{})
+	done := make(chan struct{}, workerCount)
 	sFile := make(chan model.DirSync)
-	errC := make(chan error, 1)
+	errC := make(chan error)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
+	wg.Add(1)
+
+	go func(w *sync.WaitGroup) {
+		defer w.Done()
+		select {
+		case _err, ok := <-errC:
+			if !ok {
+				fmt.Println("errC closed")
+			} else {
+				err = _err
+				close(errC)
+			}
+			break
+		}
+	}(&wg)
+
+	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go ComputeDirSync(i, ctx, &wg, done, sFile, errC, dest, diff)
 	}
@@ -130,24 +147,14 @@ func ProcessDirSync(ctx context.Context, src map[string]model.DirSync,
 	for _, v := range src {
 		sFile <- v
 	}
-
-	done <- struct{}{}
 	close(done)
 	close(sFile)
+	close(errC)
 
 	fmt.Println("wg wait")
 	wg.Wait()
-	fmt.Println("all closed")
 
-	select {
-	case _err, ok := <-errC:
-		if !ok {
-			fmt.Println("errC closed")
-		} else {
-			err = _err
-			close(errC)
-		}
-	}
+	fmt.Println("all closed")
 
 	return diff, err
 }
