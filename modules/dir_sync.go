@@ -8,11 +8,25 @@ import (
 	"io"
 	"io/fs"
 	"io/ioutil"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 )
+
+type result struct {
+	sourcePath string
+	destPath   string
+	err        error
+}
+
+type inputData struct {
+	srcPath string
+	dstPath string
+	srcSize int64
+	isDir   bool
+}
 
 type DirSync struct {
 	ctx        context.Context
@@ -21,19 +35,30 @@ type DirSync struct {
 	AbsSrcRoot string
 	AbsDstRoot string
 	TotalFiles int64
+	IsVerbose  bool
 }
 
 type DirSyncImpl interface {
 	IsEmptyDir(dirName string) (bool, error)
-	MakeDirIfEmpty(dirName string) error
+	MakeDirIfNotExist(dirName string) error
 	IsFileExist(filename string) bool
 	GetFileSize(fileName string) (int64, error)
 	IsFileReadable(fileName string) (bool, error)
 	IsFileWriteable(fileName string) (bool, error)
 	DoSync(ctx context.Context) error
+	PrintErrVerbose(any ...interface{})
 }
 
-func New(ctx context.Context, srcRoot string, dstRoot string) (DirSyncImpl, error) {
+type DSOptions func(*DirSync)
+
+func WithVerbose(isVerbose bool) DSOptions {
+	return func(ds *DirSync) {
+		ds.IsVerbose = isVerbose
+	}
+}
+
+// New will create a directory sync object given the source and destination directories
+func New(ctx context.Context, srcRoot string, dstRoot string, opts ...DSOptions) (DirSyncImpl, error) {
 	absSrc, err := filepath.Abs(srcRoot)
 	if err != nil {
 		return nil, err
@@ -44,16 +69,29 @@ func New(ctx context.Context, srcRoot string, dstRoot string) (DirSyncImpl, erro
 		return nil, err
 	}
 
-	return &DirSync{
+	ds := &DirSync{
 		ctx:        ctx,
 		SrcRoot:    srcRoot,
 		DstRoot:    dstRoot,
 		AbsSrcRoot: absSrc,
 		AbsDstRoot: absDst,
 		TotalFiles: 0,
-	}, nil
+	}
+
+	for _, opt := range opts {
+		opt(ds)
+	}
+
+	return ds, nil
 }
 
+func (ds *DirSync) PrintErrVerbose(any ...interface{}) {
+	if ds.IsVerbose {
+		log.Printf("%+v\n", any)
+	}
+}
+
+// IsEmptyDir will check if given dirName is empty directory
 func (ds *DirSync) IsEmptyDir(dirName string) (bool, error) {
 	file, err := os.Open(dirName)
 	if err != nil {
@@ -62,7 +100,7 @@ func (ds *DirSync) IsEmptyDir(dirName string) (bool, error) {
 	defer func(f *os.File) {
 		err = f.Close()
 		if err != nil {
-			fmt.Println(err)
+			ds.PrintErrVerbose(err)
 		}
 	}(file)
 
@@ -73,22 +111,23 @@ func (ds *DirSync) IsEmptyDir(dirName string) (bool, error) {
 	return false, err
 }
 
-func (ds *DirSync) MakeDirIfEmpty(dirName string) error {
+// MakeDirIfNotExist will create a directory given by dirname if not exist
+func (ds *DirSync) MakeDirIfNotExist(dirName string) error {
 	// check if destination folder exist
 	_, err := os.Stat(dirName)
 	if os.IsNotExist(err) {
 		// if not exist then create it
 		err = os.Mkdir(dirName, 0755)
 		if err != nil && os.IsNotExist(err) {
-			fmt.Println("dirname:", dirName)
-			fmt.Println("Err:", err) // we log it and pass the error
+			ds.PrintErrVerbose("dirname:", dirName, "Err:", err)
 			return err
 		}
-		fmt.Println(dirName, "succesfully created") // we log it and pass the error
+		ds.PrintErrVerbose(dirName, "successfully created")
 	}
 	return nil
 }
 
+// IsFileExist will check if file exist and return false if not
 func (ds *DirSync) IsFileExist(filename string) bool {
 	// check if destination folder exist
 	_, err := os.Stat(filename)
@@ -98,30 +137,34 @@ func (ds *DirSync) IsFileExist(filename string) bool {
 	return true
 }
 
-//nolint:funlen
+// walk files will recursively list all the files and directories of a source root and checks
+// if those files exist in destination root, if not then return the destination and the error
 func (ds *DirSync) walkFiles(done <-chan struct{}, srcRoot string, dstRoot string) (<-chan inputData, <-chan error) {
 	pathData := make(chan inputData)
 	errC := make(chan error, 1)
 
 	go func() {
 		defer close(pathData)
+		// WalkDir will recursively run through the directory for files and dirs
 		errC <- filepath.WalkDir(srcRoot, func(path string, d fs.DirEntry, err error) error {
 			if path == srcRoot {
-				return nil
+				return nil // no need to check the root
 			}
-
+			// check the error
 			if err != nil {
+				// if not about permission error then return it for handling
 				if !errors.Is(err, fs.ErrPermission) {
 					return err
 				}
-				fmt.Println("Err:", err, path, "will be skipped")
+				// if permission error then skip the file for further processing
+				ds.PrintErrVerbose("Permission Err:", err, path, "will be skipped")
 				return nil
 			}
 
 			// get the file info
 			f, _err := d.Info()
 			if _err != nil {
-				fmt.Println("Internal Err:", err, path, "will be skipped")
+				ds.PrintErrVerbose("Fail getting file info Err:", err, path, "will be skipped")
 				return _err // internal error
 			}
 
@@ -133,23 +176,23 @@ func (ds *DirSync) walkFiles(done <-chan struct{}, srcRoot string, dstRoot strin
 					if !errors.Is(errEmpty, fs.ErrPermission) {
 						return err
 					}
-					fmt.Println("Err:", errEmpty, path, "will be skipped")
+					ds.PrintErrVerbose("Err:", errEmpty, path, "will be skipped")
 					return nil
 				}
 				if isEmpty { // skip if empty directory
-					fmt.Println(path, "is empty folder, will be skipped")
+					ds.PrintErrVerbose(path, "is empty folder, will be skipped")
 					return nil
 				}
 			}
 
 			readable, err := ds.IsFileReadable(path)
 			if err != nil {
-				fmt.Println("Readable error:", err, path, "will be skipped")
+				ds.PrintErrVerbose("Readable error:", err, path, "will be skipped")
 				return err // internal error
 			}
 
 			if !readable {
-				fmt.Println(path, "cannot be read, will be skipped")
+				ds.PrintErrVerbose(path, "cannot be read, will be skipped")
 				return nil
 			}
 
@@ -161,7 +204,7 @@ func (ds *DirSync) walkFiles(done <-chan struct{}, srcRoot string, dstRoot strin
 			case pathData <- id:
 
 			case <-done:
-				fmt.Println("done in walkFiles")
+				ds.PrintErrVerbose("done in walkFiles")
 				return errors.New("walk canceled")
 			}
 			return nil
@@ -169,21 +212,6 @@ func (ds *DirSync) walkFiles(done <-chan struct{}, srcRoot string, dstRoot strin
 	}()
 
 	return pathData, errC
-}
-
-// A result is the product of reading and summing a file using MD5.
-type result struct {
-	sourcePath string
-	destPath   string
-	err        error
-}
-
-// A result is the product of reading and summing a file using MD5.
-type inputData struct {
-	srcPath string
-	dstPath string
-	srcSize int64
-	isDir   bool
 }
 
 func (ds *DirSync) GetFileSize(fileName string) (int64, error) {
@@ -194,7 +222,7 @@ func (ds *DirSync) GetFileSize(fileName string) (int64, error) {
 	defer func(f *os.File) {
 		err = f.Close()
 		if err != nil {
-			fmt.Println(err)
+			ds.PrintErrVerbose(err)
 		}
 	}(file)
 
@@ -215,7 +243,7 @@ func (ds *DirSync) IsFileReadable(fileName string) (bool, error) {
 	}
 	err = file.Close()
 	if err != nil {
-		fmt.Println(err)
+		ds.PrintErrVerbose(err)
 	}
 
 	return true, nil
@@ -231,7 +259,7 @@ func (ds *DirSync) IsFileWriteable(fileName string) (bool, error) {
 	}
 	err = file.Close()
 	if err != nil {
-		fmt.Println(err)
+		ds.PrintErrVerbose(err)
 	}
 	return true, nil
 }
@@ -241,7 +269,7 @@ func (ds *DirSync) checker(done <-chan struct{}, paths <-chan inputData, c chan<
 		// fmt.Println(fInput.srcPath, "-", fInput.dstPath)
 		var err error
 		if fInput.isDir {
-			err = ds.MakeDirIfEmpty(fInput.dstPath)
+			err = ds.MakeDirIfNotExist(fInput.dstPath)
 			if err == nil {
 				continue
 			}
@@ -253,13 +281,13 @@ func (ds *DirSync) checker(done <-chan struct{}, paths <-chan inputData, c chan<
 					dataSrc, err := ioutil.ReadFile(fInput.srcPath)
 					if err != nil {
 						// skip the file
-						fmt.Println("ioutil.ReadFile(fInput.srcPath) err:", err)
+						ds.PrintErrVerbose("ioutil.ReadFile(fInput.srcPath) err:", err)
 						continue
 					}
 					dataDst, err := ioutil.ReadFile(fInput.dstPath)
 					if err != nil {
 						// skip the file
-						fmt.Println("ioutil.ReadFile(fInput.dstPath) err:", err)
+						ds.PrintErrVerbose("ioutil.ReadFile(fInput.dstPath) err:", err)
 						continue
 					}
 					if md5.Sum(dataSrc) == md5.Sum(dataDst) { //nolint:gosec
@@ -268,7 +296,7 @@ func (ds *DirSync) checker(done <-chan struct{}, paths <-chan inputData, c chan<
 					}
 				}
 			} else {
-				fmt.Println("else:", err)
+				ds.PrintErrVerbose("else:", err)
 			}
 		}
 		select {
@@ -307,26 +335,26 @@ func (ds *DirSync) DoSync(ctx context.Context) error {
 	for r := range c {
 		count++
 		if r.err != nil {
-			fmt.Println("Err r.err:", r.err)
+			ds.PrintErrVerbose("Err r.err:", r.err)
 			continue
 		}
 
 		input, err := ioutil.ReadFile(r.sourcePath)
 		if err != nil {
-			fmt.Println("Error Read input:", err)
+			ds.PrintErrVerbose("Error Read input:", err)
 			return err
 		}
 
 		err = ioutil.WriteFile(r.destPath, input, 0755) //nolint:gosec
 		if err != nil {
-			fmt.Println("Error creating", r.destPath, "Err:", err)
+			ds.PrintErrVerbose("Error creating", r.destPath, "Err:", err)
 			return err
 		}
 	}
 
 	// Check whether the Walk failed.
 	if err := <-errc; err != nil {
-		fmt.Println("walkFiles err:", err)
+		ds.PrintErrVerbose("walkFiles err:", err)
 		return err
 	}
 

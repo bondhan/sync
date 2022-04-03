@@ -16,6 +16,8 @@ func checkErr(err error) {
 	}
 }
 
+// isDir will check if path is directory, if
+// not will return false and error
 func isDir(path string) (bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -42,8 +44,10 @@ func isDir(path string) (bool, error) {
 
 func main() {
 	var src, dest string
+	var isVerbose bool
 	flag.StringVar(&src, "s", "", "source folder")
 	flag.StringVar(&dest, "d", "", "destination folder")
+	flag.BoolVar(&isVerbose, "v", false, "verbose")
 	flag.Parse()
 
 	if dest == "" || src == "" {
@@ -61,7 +65,7 @@ func main() {
 	_, err = isDir(dest)
 	checkErr(err)
 
-	ds, err := dsync.New(ctx, src, dest)
+	ds, err := dsync.New(ctx, src, dest, dsync.WithVerbose(isVerbose))
 	checkErr(err)
 
 	err = ds.DoSync(ctx)
