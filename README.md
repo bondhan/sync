@@ -1,6 +1,6 @@
 # sync
 
-sync v0.1 will sync files/directory from a source folder to destination folder. It is dumb, there is no diff check.
+sync v0.1 will sync files/directory from a source folder to destination folder. It is dumb, there is no diff check. this is for accelbyte technical test
 
 ## Compile
 
